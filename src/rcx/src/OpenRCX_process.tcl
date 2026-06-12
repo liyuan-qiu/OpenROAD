@@ -102,7 +102,7 @@ proc gen_solver_patterns { args } {
   if { [info exists keys(-len)] } {
     set len $keys(-len)
   }
-  set w_list "1"
+  set w_list "1 1.5 2 3 5"
   if { [info exists keys(-w_list)] } {
     set w_list $keys(-w_list)
   }
@@ -119,6 +119,8 @@ proc gen_solver_patterns { args } {
     set under_dist $keys(-under_dist)
   }
 
+  # Keep width/spacing lists as single Tcl arguments; otherwise list items
+  # can be expanded into positional args and silently collapse coverage.
   rcx::gen_solver_patterns $process_file $process_name $version $cnt $len \
-    $over_dist $under_dist $w_list $s_list
+    $over_dist $under_dist "$w_list" "$s_list"
 }

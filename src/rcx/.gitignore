@@ -1,3 +1,6 @@
 *~
 test/results
 test/rulesGen.log
+
+# FasterCap local scratch (generated during calibration runs)
+calibration/work/

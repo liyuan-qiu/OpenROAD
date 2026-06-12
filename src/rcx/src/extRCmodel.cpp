@@ -704,9 +704,12 @@ extDistRC* extDistRCTable::getComputeRC(uint32_t dist)
 
 uint32_t extDistWidthRCTable::getWidthIndex(uint32_t w)
 {
-  // To notify that the RC info for a particular pattern
-  // is empty
-  if (_lastWidth == -1) {
+  // To notify that the RC info for a particular pattern is empty.
+  // Some generated models can contain WIDTH Table 0 entries, which leaves
+  // the width map uninitialized. Guard this path so extraction can continue
+  // and missing tables can be reported instead of crashing.
+  if (_widthTable == nullptr || _widthTable->getCnt() == 0
+      || _widthMapTable == nullptr || _lastWidth == -1) {
     return -1;
   }
 
@@ -719,7 +722,12 @@ uint32_t extDistWidthRCTable::getWidthIndex(uint32_t w)
     return 0;
   }
 
-  return _widthMapTable->geti(v / _modulo);
+  const uint32_t map_index = v / _modulo;
+  if (map_index >= _widthMapTable->getCnt()) {
+    return _widthTable->getCnt() - 1;
+  }
+
+  return _widthMapTable->geti(map_index);
 }
 
 uint32_t extDistWidthRCTable::getDiagWidthIndex(uint32_t m, uint32_t w)

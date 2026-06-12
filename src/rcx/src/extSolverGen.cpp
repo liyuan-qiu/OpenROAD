@@ -32,6 +32,13 @@ uint32_t extSolverGen::genSolverPatterns(const char* process_name,
                   w_list,
                   s_list);
   }
+  logger_->info(utl::RCX,
+                253,
+                "w_list='{}' widthMultTable.size={} s_list='{}' spaceMultTable.size={}",
+                w_list,
+                _widthMultTable.size(),
+                s_list,
+                _spaceMultTable.size());
 
   initLogFiles(process_name);
   _len = len;
@@ -153,7 +160,6 @@ uint32_t extSolverGen::widthsSpacingsLoop(uint32_t diagMet)
         }
       }
     }
-    return cnt;
   }
   return cnt;
 }

@@ -75,8 +75,8 @@ model:
 	echo "init_rcx_model -corner_names \"TYP MIN\" -met_cnt 7" > $(readCaps_tcl) ; \
 	echo "read_rcx_tables -corner TYP -file  $(top_dir)/5v2_typ_parse/5v2_typ.caps " >>  $(readCaps_tcl) ; \
 	echo "read_rcx_tables -corner TYP -file  $(top_dir)/5v2_typ/resistance.TYP " >>  $(readCaps_tcl) ; \
-	echo "read_rcx_tables -corner TYP -file  $(top_dir)/5v2_min_patrse/5v2_typ.caps " >>  $(readCaps_tcl) ; \
-	echo "read_rcx_tables -corner TYP -file  $(top_dir)/5v2_min/resistance.TYP " >>  $(readCaps_tcl) ; \
+	echo "read_rcx_tables -corner MIN -file  $(top_dir)/5v2_min_parse/5v2_min.caps " >>  $(readCaps_tcl) ; \
+	echo "read_rcx_tables -corner MIN -file  $(top_dir)/5v2_min/resistance.MIN " >>  $(readCaps_tcl) ; \
 	echo "write_rcx_model -file 130.rcx.model " >> $(readCaps_tcl) ; \
 	$(openroad) < $(readCaps_tcl) > OUT ; \
 	# echo "$@ diffs: `diff -w -r . ../gen924.GOLD` "

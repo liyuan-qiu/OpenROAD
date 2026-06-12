@@ -1,0 +1,70 @@
+# -----------------------------------------------------------------------------
+# FasterCap calibration local artifacts (generated files)
+# Keep scripts/configs/Makefile tracked; ignore bulky run outputs.
+# -----------------------------------------------------------------------------
+
+# Calibration run output trees (FasterCap case directories)
+5v2_*/
+
+# Local binaries and input data caches
+bin/
+data/
+
+# Generated RCX models and comparison outputs
+model/
+model_widened/
+
+# Quantus bench exports
+quantus_bench/
+
+# Batch / grid-search / rerun result artifacts
+*_results.csv
+*_results_round*.csv
+batch_*.csv
+grid_search_*.csv
+rerun_*.csv
+rerun_*.list
+rerun_*.meta.csv
+empty_tables_*.csv
+ok_pattern_times*.csv
+ok_pattern_times*.txt
+precheck_*.csv
+sanitize_*.list
+sanitize_*.txt
+all_case_wires_files.txt
+cases_other_than10.txt
+run_manifest.md
+
+# Generic logs and temporary outputs
+**/OUT
+**/OUT_*
+**/*.log
+**/*.tmp
+**/*.bak
+
+# Solver outputs
+**/wires.log
+**/Wires.log
+**/run_stats
+**/run_stats.*
+**/warnings
+**/warning.log
+**/empty_files
+**/empty.log
+
+# Parse artifacts
+**/*.caps
+**/pattern.len_meta.csv
+**/sorted.input.list
+**/wire_log_file_list
+
+# Case snapshot DEFs generated during debugging
+**/case_snapshot_*.def
+
+# Images generated during comparisons
+**/*.png
+
+# Runtime scratch directories
+5v2_*_fasterCap.standard.*
+5v2_*_parse*
+OUT.standard.*

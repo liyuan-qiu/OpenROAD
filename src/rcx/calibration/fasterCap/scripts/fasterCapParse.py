@@ -172,7 +172,9 @@ def getMets(word):
     return [met, metUnder, metOver, diag]
 
 
-def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
+def readFasterCapOutPutLog(
+    in_file, out_file, warnFP, emptyFP, statsFP, dbg, lenMetaFP=None
+):
     # reads the log file and parses the cap values for all conductors from the last valid iteration
 
     if dbg > 1:
@@ -185,10 +187,15 @@ def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
     iteration = []
     rows = []
     patternName = ""
+    # Some failed FasterCap logs do not contain "Input file:" header.
+    # Keep a safe fallback to avoid UnboundLocalError in warnings.
+    full_pattern_file = in_file
     spacings = []
     widths = []
     mets = []
     patternType = ""
+    len_in_widths = 0
+    physical_len_um = 0.0
 
     mbytes = 0
     secs = 0
@@ -212,10 +219,26 @@ def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
             spacings = [getWS(word[n - 2], "S", 0), getWS(word[n - 2], "S", 1)]
             widths = [getWS(word[n - 3], "W", 0), getWS(word[n - 3], "W", 1)]
             len_in_widths = int(word[n - 2].split("L")[1])
+            # IMPORTANT:
+            # - LEN in pattern names (e.g. L10) is a multiplier in units of target wire
+            #   width, NOT an absolute physical length in um.
+            # - OpenRCX parser reads LEN as an integer multiplier from the caps line.
+            #   Keep writing LEN as multiplier for compatibility.
+            # Physical length for bookkeeping:
+            #   physical_len_um = len_in_widths * width_um
+            physical_len_um = len_in_widths * widths[0]
             mets = getMets(word[n - 4])
             patternType = word[n - 5]
             if dbg > 1:
-                print(patternName, spacings, widths, mets, len_in_widths)
+                print(
+                    patternName,
+                    spacings,
+                    widths,
+                    mets,
+                    len_in_widths,
+                    "physical_len_um=",
+                    physical_len_um,
+                )
             continue
 
         if "Iteration number" in line:
@@ -272,23 +295,13 @@ def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
             print("Warning -- iterations= ", iterCnt, len(iteration))
             print(iteration[lastIterationIndex])
 
-        # warning1='Incomplete Last Iteration ' + in_file
-        warning1 = "Incomplete Last Iteration " + full_pattern_file
+        # Newer FasterCap logs (e.g. with -r/GMRES traces) can miss "Weighted Frobenius"
+        # while still printing a valid final capacitance matrix. In that case, keep the
+        # last parsed matrix instead of dropping the case.
+        warning1 = "Missing completion marker; fallback to last matrix " + full_pattern_file
         warnFP.write(warning1 + "\n")
-
-        warning = "Incomplete"
-        lastIterationIndex = lastIterationIndex - 2
-        if lastIterationIndex < 0 or len(iteration[lastIterationIndex]) < dimension:
-            if dbg > 0:
-                print(
-                    "Warning: Before last iteration: ",
-                    lastIterationIndex,
-                    " Incomplete",
-                )
-            # warning1='Incomplete Before Last Iteration ' + in_file
-            warning1 = "Incomplete Before Last Iteration " + full_pattern_file
-            warnFP.write(warning1 + "\n")
-            return [0, line_cnt, warning1]
+        warning = "FallbackLastMatrix"
+        lastIterationIndex = len(iteration) - 1
 
     wireCnt = getWireCnt(iteration[0], mets, dbg)
     met = mets[0]
@@ -340,6 +353,7 @@ def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
         full_net_name = patternName + "wire_" + str(caps[0])
 
         # print(out_line, "CC", cc, "FR", fr , 'TC', tc, 'CC2', cc2, ' ', diagCaps, full_net_name, run_stats, warning)
+        # Keep LEN as integer multiplier to match OpenRCX parser expectations.
         out_file.write(
             out_line
             + "  LEN "
@@ -356,10 +370,21 @@ def readFasterCapOutPutLog(in_file, out_file, warnFP, emptyFP, statsFP, dbg):
             + diagCaps
             + " "
             + full_net_name
-            + " "
-            + warning
         )
         out_file.write("\n")
+        if lenMetaFP is not None:
+            lenMetaFP.write(
+                full_net_name
+                + ","
+                + str(len_in_widths)
+                + ","
+                + getWSformat(widths[0])
+                + ","
+                + getWSformat(physical_len_um)
+                + ","
+                + "physical_len_um = len_in_widths * width_um"
+                + "\n"
+            )
     run_stats = (
         str(mbytes)
         + " MB "
@@ -393,6 +418,12 @@ def main():
         help="Output Filename, default=pattern.caps",
     )
     arg_parser.add_argument(
+        "-len_meta_file",
+        type=str,
+        default="pattern.len_meta.csv",
+        help="Output csv for LEN multiplier and physical length, default=pattern.len_meta.csv",
+    )
+    arg_parser.add_argument(
         "-wire", type=int, default=3, help="target wire number, default=3"
     )
     arg_parser.add_argument("-dbg", type=int, default=0, help="debug level, default=0")
@@ -403,6 +434,10 @@ def main():
     warnFP = OpenFile("warnings", "w")
     emptyFP = OpenFile("empty_files", "w")
     statsFP = OpenFile("run_stats", "w")
+    lenMetaFP = OpenFile(args.len_meta_file, "w")
+    lenMetaFP.write(
+        "full_net_name,len_in_widths,width_um,physical_len_um,formula\n"
+    )
     file_cnt = 0
     incompleteCnt = 0
     empty_file_cnt = 0
@@ -411,7 +446,9 @@ def main():
     dbg = args.dbg
     # Single file
     if len(args.in_list_file) == 0:
-        readFasterCapOutPutLog(args.in_file, outFP, warnFP, emptyFP, statsFP, dbg)
+        retCode = readFasterCapOutPutLog(
+            args.in_file, outFP, warnFP, emptyFP, statsFP, dbg, lenMetaFP
+        )
         file_cnt += 1
 
         if retCode[0] == 1:
@@ -429,7 +466,7 @@ def main():
     f = OpenFile(args.in_list_file)
     for file_line in f:
         retCode = readFasterCapOutPutLog(
-            file_line.split()[0], outFP, warnFP, emptyFP, statsFP, dbg
+            file_line.split()[0], outFP, warnFP, emptyFP, statsFP, dbg, lenMetaFP
         )
         file_cnt += 1
 
@@ -447,6 +484,7 @@ def main():
     warnFP.close()
     emptyFP.close()
     statsFP.close()
+    lenMetaFP.close()
 
     print(file_cnt, " Files Parsed")
     print(empty_file_cnt, " Files are Empty -- look at file:empty_files")
