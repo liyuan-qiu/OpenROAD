@@ -1,0 +1,1 @@
+/home/liyuanqiu/OpenROAD-flow-scripts/tools/OpenROAD/src/rcx/calibration/fastercapnangate45/scripts/compare_partial_model_vs_rules.sh

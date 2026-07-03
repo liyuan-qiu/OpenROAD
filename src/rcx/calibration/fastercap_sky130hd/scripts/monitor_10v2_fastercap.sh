@@ -1,0 +1,1 @@
+/home/liyuanqiu/OpenROAD-flow-scripts/tools/OpenROAD/src/rcx/calibration/fastercapnangate45/scripts/monitor_10v2_fastercap.sh

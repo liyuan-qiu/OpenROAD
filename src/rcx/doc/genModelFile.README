@@ -6,7 +6,7 @@
 # Date: 11/12/2024
 
 
-cd src/rcx/calibration/fasterCap
+cd src/rcx/calibration/fastercapnangate45
 # follow Makefile steps below
 
 # Prerequisites: FasterCap executable and related system libraries installed

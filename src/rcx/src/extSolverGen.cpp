@@ -99,8 +99,6 @@ uint32_t extSolverGen::widthsSpacingsLoop(uint32_t diagMet)
 
   double diag_min_width = 0.0;
   double diag_min_spacing = 0.0;
-  uint32_t diagSpaceCnt = 3;
-  float diagSpaceMultipliers[3] = {0, 1.0, 2.0};
   _diag = diagMet > 0;
   if (_diag > 0) {
     diag_min_width = getConductor(diagMet)->_min_width;
@@ -138,14 +136,13 @@ uint32_t extSolverGen::widthsSpacingsLoop(uint32_t diagMet)
         }
       }
     } else {
-      uint32_t scnt = 3;  // First 3 spacings from the spacing table
-      for (uint32_t kk = 0; kk < diagSpaceCnt; kk++) {
-        float mult_s = diagSpaceMultipliers[kk];
-        float diag_s = mult_s * (diag_min_spacing + diag_min_width);
+      // UnderDiag victim spacing: full s_list (rules DIST axis).
+      // Diag (s2): s2=0 only (aligned above victim; matches DIAGMODEL ON 1D rules).
+      const double diag_s_samples[1] = {0.0};
 
-        for (uint32_t jj = 0; jj < scnt; jj++) {
-          float mult_s = _spaceMultTable[jj];
-          float s = mult_s * min_spacing;
+      for (double diag_s : diag_s_samples) {
+        for (float mult_s : _spaceMultTable) {
+          const float s = mult_s * min_spacing;
 
           setTargetParams(w, s, 0.0, t, h, diag_min_width, diag_s);
           measurePatternVar_3D(
