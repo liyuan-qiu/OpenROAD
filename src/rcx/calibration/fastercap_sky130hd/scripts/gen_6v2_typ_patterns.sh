@@ -11,6 +11,7 @@ W_LIST="${W_LIST:-1}"
 S_LIST="${S_LIST:-1.0 1.5 2.0 3 5 6 7 8 9 10}"
 WIRE_CNT="${WIRE_CNT:-5}"
 VERSION="${VERSION:-2}"
+LEN="${LEN:-10}"
 PROCESS="${PROCESS:-${FC_DIR}/data/process.TYP}"
 CORNER="${CORNER:-TYP}"
 
@@ -19,16 +20,20 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [[ -f "${PROCESS}" ]] || die "process file missing: ${PROCESS}"
 
 FC_ABS="/OpenROAD-flow-scripts/tools/OpenROAD/src/rcx/calibration/fastercap_sky130hd"
+PROCESS_REL="${PROCESS#${REPO_ROOT}/}"
+[[ "${PROCESS_REL}" != "${PROCESS}" ]] || die "PROCESS must be inside repository: ${PROCESS}"
+PROCESS_DOCKER="/OpenROAD-flow-scripts/${PROCESS_REL}"
 mkdir -p "${FC_DIR}/${RUN_DIR}"
 
 cat > "${FC_DIR}/${RUN_DIR}/tmp_gen_patterns.tcl" <<EOF
 cd ${FC_ABS}/${RUN_DIR}
-gen_solver_patterns -process_file ${FC_ABS}/data/process.TYP -process_name ${CORNER} \\
-  -wire_cnt ${WIRE_CNT} -version ${VERSION} -w_list "${W_LIST}" -s_list "${S_LIST}"
+gen_solver_patterns -process_file ${PROCESS_DOCKER} -process_name ${CORNER} \\
+  -wire_cnt ${WIRE_CNT} -version ${VERSION} -len ${LEN} \\
+  -w_list "${W_LIST}" -s_list "${S_LIST}"
 EOF
 
 echo "==> RUN_DIR=${RUN_DIR}"
-echo "    w_list='${W_LIST}'  s_list='${S_LIST}'"
+echo "    len=${LEN}  w_list='${W_LIST}'  s_list='${S_LIST}'"
 echo "    (max spacing mult = last s_list entry)"
 
 docker run --rm -v "${REPO_ROOT}:/OpenROAD-flow-scripts" \

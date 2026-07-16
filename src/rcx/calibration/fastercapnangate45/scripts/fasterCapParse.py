@@ -4,11 +4,12 @@
 import os
 import re
 import argparse
-import math
-import xlsxwriter
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
+import sys
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 
 def OpenFile(file_path, rw="r"):
@@ -195,16 +196,45 @@ def conductor_block_max_rel_asym(matrix, min_abs=1e-16):
     if len(matrix) <= 1:
         return 0.0
     sub = [row[1:] for row in matrix[1:]]
-    n = len(sub)
+    return _matrix_max_rel_asym(sub, min_abs)
+
+
+def _matrix_max_rel_asym(matrix, min_abs=1e-16):
+    n = len(matrix)
     max_rel = 0.0
     for i in range(n):
         for j in range(i + 1, n):
-            a, b = sub[i][j], sub[j][i]
+            a, b = matrix[i][j], matrix[j][i]
             ref = max(abs(a), abs(b))
             if ref < min_abs:
                 continue
             max_rel = max(max_rel, abs(a - b) / ref)
     return max_rel
+
+
+def _load_quality_gate():
+    import importlib.util
+
+    # fasterCapParse may live under fastercapnangate45 while matrix_quality_gate
+    # is maintained under fastercap_sky130hd (symlinked parser).
+    candidates = [
+        _SCRIPT_DIR / "matrix_quality_gate.py",
+        _SCRIPT_DIR.parent.parent / "fastercap_sky130hd" / "scripts" / "matrix_quality_gate.py",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("matrix_quality_gate", path)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["matrix_quality_gate"] = mod
+        spec.loader.exec_module(mod)
+        return mod.GateConfig, mod.evaluate_matrix_quality_gate
+    raise ImportError(
+        "matrix_quality_gate not found; expected fastercapnangate45/scripts "
+        "or fastercap_sky130hd/scripts"
+    )
 
 
 def symmetrize_off_diagonal_avg(matrix):
@@ -227,9 +257,8 @@ def readFasterCapOutPutLog(
     dbg,
     lenMetaFP=None,
     symmetrize_avg=False,
-    max_asym_rel=None,
-    asym_min_cap=1e-16,
-    skip_asymFP=None,
+    quality_gate=None,
+    skip_qualityFP=None,
 ):
     # reads the log file and parses the cap values for all conductors from the last valid iteration
 
@@ -361,16 +390,20 @@ def readFasterCapOutPutLog(
 
     matrix_rows = iteration[lastIterationIndex]
     names, mat = matrix_rows_to_float(matrix_rows)
-    max_rel = conductor_block_max_rel_asym(mat, min_abs=asym_min_cap)
-    if max_asym_rel is not None and max_rel > max_asym_rel:
-        msg = (
-            f"SkippedAsymmetry rel={max_rel:.6g} threshold={max_asym_rel} "
-            + full_pattern_file
-        )
-        if skip_asymFP is not None:
-            skip_asymFP.write(in_file + f" rel={max_rel:.6g}\n")
-        warnFP.write(msg + "\n")
-        return [0, line_cnt, msg]
+    if quality_gate is not None:
+        GateConfig, evaluate_matrix_quality_gate = _load_quality_gate()
+        if isinstance(quality_gate, dict):
+            gate_cfg = GateConfig(**quality_gate)
+        else:
+            gate_cfg = quality_gate
+        passed, reason, metrics = evaluate_matrix_quality_gate(mat, gate_cfg)
+        if not passed:
+            rel = metrics.get("global_max_rel_asym", "")
+            msg = f"SkippedQuality {reason} rel={rel} " + full_pattern_file
+            if skip_qualityFP is not None:
+                skip_qualityFP.write(f"{in_file}\t{reason}\t{rel}\n")
+            warnFP.write(msg + "\n")
+            return [0, line_cnt, msg]
 
     if symmetrize_avg:
         symmetrize_off_diagonal_avg(mat)
@@ -539,21 +572,67 @@ def main():
         "--max-asym-rel",
         type=float,
         default=None,
-        help="Skip pattern when conductor-block max |Cij-Cji|/max(|Cij|,|Cji|) exceeds this",
+        help="Skip pattern when full-matrix reciprocity exceeds this (default: disabled)",
     )
     arg_parser.add_argument(
         "--asym-min-cap",
         type=float,
         default=1e-16,
-        help="Minimum |C| (F) for asymmetry check on off-diagonal pairs",
+        help="Minimum |C| (F) for reciprocity check on off-diagonal pairs",
+    )
+    arg_parser.add_argument(
+        "--reject-pos-offdiag",
+        action="store_true",
+        help="Skip pattern when strong off-diagonal entries are positive",
+    )
+    arg_parser.add_argument(
+        "--reject-sign-flip",
+        action="store_true",
+        help="Skip pattern when strong reciprocal pairs have opposite signs",
+    )
+    arg_parser.add_argument(
+        "--skip-quality-log",
+        type=str,
+        default="",
+        help="TSV log of skipped patterns: path rel reason max_rel",
+    )
+    arg_parser.add_argument(
+        "--skip-quality-append",
+        action="store_true",
+        help="Append to --skip-quality-log instead of truncating",
     )
 
     args = arg_parser.parse_args()
 
+    GateConfig, _evaluate_matrix_quality_gate = _load_quality_gate()
+    quality_gate = None
+    if (
+        args.max_asym_rel is not None
+        or args.reject_pos_offdiag
+        or args.reject_sign_flip
+    ):
+        reciprocity_cap = (
+            args.max_asym_rel if args.max_asym_rel is not None else float("inf")
+        )
+        quality_gate = GateConfig(
+            max_rel=reciprocity_cap,
+            min_abs=args.asym_min_cap,
+            reject_pos_offdiag=args.reject_pos_offdiag,
+            reject_sign_flip=args.reject_sign_flip,
+        )
+
     outFP = OpenFile(args.out_file, "w")
     warnFP = OpenFile("warnings", "w")
     emptyFP = OpenFile("empty_files", "w")
-    skip_asymFP = OpenFile("skipped_asymmetry", "w") if args.max_asym_rel is not None else None
+    skip_qualityFP = None
+    if args.skip_quality_log:
+        mode = "a" if args.skip_quality_append else "w"
+        skip_qualityFP = open(args.skip_quality_log, mode, encoding="utf-8")
+        if mode == "w":
+            skip_qualityFP.write("path\treason\tglobal_max_rel_asym\n")
+    elif quality_gate is not None:
+        skip_qualityFP = OpenFile("skipped_quality.tsv", "w")
+        skip_qualityFP.write("path\treason\tglobal_max_rel_asym\n")
     statsFP = OpenFile("run_stats", "w")
     lenMetaFP = OpenFile(args.len_meta_file, "w")
     lenMetaFP.write(
@@ -563,14 +642,13 @@ def main():
     incompleteCnt = 0
     empty_file_cnt = 0
     successCnt = 0
-    skipped_asym_cnt = 0
+    skipped_quality_cnt = 0
 
     dbg = args.dbg
     parse_kw = dict(
         symmetrize_avg=args.symmetrize_avg,
-        max_asym_rel=args.max_asym_rel,
-        asym_min_cap=args.asym_min_cap,
-        skip_asymFP=skip_asymFP,
+        quality_gate=quality_gate,
+        skip_qualityFP=skip_qualityFP,
     )
 
     # Single file
@@ -622,21 +700,21 @@ def main():
             empty_file_cnt += 1
         if retCode[0] == 0 and "Incomplete" in retCode[2]:
             incompleteCnt += 1
-        if retCode[0] == 0 and "SkippedAsymmetry" in retCode[2]:
-            skipped_asym_cnt += 1
+        if retCode[0] == 0 and "SkippedQuality" in retCode[2]:
+            skipped_quality_cnt += 1
 
     outFP.close()
     warnFP.close()
     emptyFP.close()
-    if skip_asymFP is not None:
-        skip_asymFP.close()
+    if skip_qualityFP is not None:
+        skip_qualityFP.close()
     statsFP.close()
     lenMetaFP.close()
 
     print(file_cnt, " Files Parsed")
     print(successCnt, " Files extracted to caps")
     print(empty_file_cnt, " Files are Empty -- look at file:empty_files")
-    print(skipped_asym_cnt, " Files skipped for asymmetry -- look at file:skipped_asymmetry")
+    print(skipped_quality_cnt, " Files skipped for quality -- see skipped_quality.tsv")
     print(incompleteCnt, " Files were incomplete -- look at file: warnings")
 
 

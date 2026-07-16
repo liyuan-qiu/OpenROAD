@@ -154,6 +154,7 @@ class Shapes:
     shapex = 0.0
     shapey = 0.0
     shapez = 0.0
+    epsilon = 0.0
 
     def __init__(
         self,
@@ -166,6 +167,7 @@ class Shapes:
         ycoordinate: float,
         zcoordinate: float,
         shapetype: int,
+        epsilon: float = 0.0,
     ) -> None:
         self.name = name
         self.shapeorder = order
@@ -176,6 +178,7 @@ class Shapes:
         self.shapey = ycoordinate
         self.shapez = zcoordinate
         self.shapetype = shapetype
+        self.epsilon = epsilon
 
     def print_contents(self) -> None:
         print(
@@ -484,6 +487,7 @@ def TranslateUniversalFile(Universalfilename: str, FasterCapfilename: str):
                             LLcornery,
                             LLcornerz,
                             shapetype,
+                            dielectric.epsilon,
                         )
                     )
 
@@ -725,6 +729,62 @@ def write_dielectric_top_panel(
     file.close()
 
 
+def write_dielectric_top_panel_with_holes(
+    filename: str,
+    name: str,
+    width: float,
+    thickness: float,
+    height: float,
+    holes,
+):
+    """Write a dielectric interface with rectangular conductor cutouts."""
+    panels = [(0.0, width, 0.0, height)]
+    tolerance = 1.0e-10
+
+    for hole_x0, hole_x1, hole_z0, hole_z1 in holes:
+        next_panels = []
+        for panel_x0, panel_x1, panel_z0, panel_z1 in panels:
+            cut_x0 = max(panel_x0, hole_x0)
+            cut_x1 = min(panel_x1, hole_x1)
+            cut_z0 = max(panel_z0, hole_z0)
+            cut_z1 = min(panel_z1, hole_z1)
+            if cut_x1 - cut_x0 <= tolerance or cut_z1 - cut_z0 <= tolerance:
+                next_panels.append((panel_x0, panel_x1, panel_z0, panel_z1))
+                continue
+
+            if cut_x0 - panel_x0 > tolerance:
+                next_panels.append((panel_x0, cut_x0, panel_z0, panel_z1))
+            if panel_x1 - cut_x1 > tolerance:
+                next_panels.append((cut_x1, panel_x1, panel_z0, panel_z1))
+            if cut_z0 - panel_z0 > tolerance:
+                next_panels.append((cut_x0, cut_x1, panel_z0, cut_z0))
+            if panel_z1 - cut_z1 > tolerance:
+                next_panels.append((cut_x0, cut_x1, cut_z1, panel_z1))
+        panels = next_panels
+
+    with open(filename, "w+") as file:
+        file.write("* Dielectric interface with conductor cutouts\n")
+        file.write("* face name | four coordinates of one face\n\n")
+        for x0, x1, z0, z1 in panels:
+            file.write(
+                "Q dielectric_{}  {} {} {}     {} {} {}     {} {} {}     {} {} {}\n".format(
+                    name,
+                    x0,
+                    thickness,
+                    z0,
+                    x1,
+                    thickness,
+                    z0,
+                    x1,
+                    thickness,
+                    z1,
+                    x0,
+                    thickness,
+                    z1,
+                )
+            )
+
+
 def write_wire_side_panels(
     filename: str, name: str, width: float, thickness: float, height: float
 ):
@@ -944,6 +1004,131 @@ def process_intersection():
     pass
 
 
+def scaled_dielectric_epsilon(dielectric):
+    """Return the epsilon carried by this case-local dielectric shape."""
+    return round(float(dielectric.epsilon) * 1.0e-6, 8)
+
+
+def adjacent_dielectric_epsilon(dielectric, offset):
+    """Return adjacent case-local epsilon, clamped at the stack boundary."""
+    wanted = dielectric.shapeorder + offset
+    for shape in PatternShapes:
+        if shape.shapetype == 0 and shape.shapeorder == wanted:
+            return scaled_dielectric_epsilon(shape)
+    return scaled_dielectric_epsilon(dielectric)
+
+
+def write_intersected_dielectric(
+    fastercapfile,
+    dielectric,
+    conductor_indices,
+    dielectric_index,
+    dielectric_count,
+    ground_conductor_exists,
+):
+    """Write dielectric boundaries without panels inside conductors."""
+    epsilon = scaled_dielectric_epsilon(dielectric)
+    prefix = (
+        "Dielectrics/dielectric_"
+        + dielectric.name
+        + "_W"
+        + str(dielectric.shapewidth)
+        + "_T"
+        + str(dielectric.shapethickness)
+        + "_H"
+        + str(dielectric.shapeheight)
+    )
+
+    if dielectric.shapeorder == 0 and ground_conductor_exists == 0:
+        dielectricfile = prefix + "-bottom.txt"
+        write_dielectric_bottom_panel(
+            dielectricfile,
+            dielectric.name,
+            dielectric.shapewidth,
+            dielectric.shapethickness,
+            dielectric.shapeheight,
+        )
+        insert_dielectric_into_pattern_file(
+            fastercapfile,
+            dielectricfile,
+            1.0e-6,
+            epsilon,
+            dielectric.shapex,
+            dielectric.shapey,
+            dielectric.shapez,
+            dielectric.shapex + 0.01,
+            dielectric.shapey + 0.01,
+            dielectric.shapez + 0.01,
+        )
+
+    dielectricfile = prefix + "-sides.txt"
+    write_dielectric_side_panels(
+        dielectricfile,
+        dielectric.name,
+        dielectric.shapewidth,
+        dielectric.shapethickness,
+        dielectric.shapeheight,
+    )
+    insert_dielectric_into_pattern_file(
+        fastercapfile,
+        dielectricfile,
+        1.0e-6,
+        epsilon,
+        dielectric.shapex,
+        dielectric.shapey,
+        dielectric.shapez,
+        dielectric.shapex + 0.01,
+        dielectric.shapey + 0.01,
+        dielectric.shapez + 0.01,
+    )
+
+    if dielectric_index >= dielectric_count - 1:
+        return
+
+    interface_y = dielectric.shapey + dielectric.shapethickness
+    holes = []
+    tolerance = 1.0e-9
+    for conductor_index in conductor_indices:
+        conductor = PatternShapes[conductor_index]
+        conductor_top = conductor.shapey + conductor.shapethickness
+        if not (
+            conductor.shapey < interface_y + tolerance
+            and conductor_top >= interface_y - tolerance
+        ):
+            continue
+        holes.append(
+            (
+                conductor.shapex - dielectric.shapex,
+                conductor.shapex + conductor.shapewidth - dielectric.shapex,
+                conductor.shapez - dielectric.shapez,
+                conductor.shapez + conductor.shapeheight - dielectric.shapez,
+            )
+        )
+
+    dielectricfile = prefix + "-top.txt"
+    write_dielectric_top_panel_with_holes(
+        dielectricfile,
+        dielectric.name,
+        dielectric.shapewidth,
+        dielectric.shapethickness,
+        dielectric.shapeheight,
+        holes,
+    )
+    outside_epsilon = adjacent_dielectric_epsilon(dielectric, 1)
+    insert_dielectric_into_pattern_file(
+        fastercapfile,
+        dielectricfile,
+        outside_epsilon,
+        epsilon,
+        dielectric.shapex,
+        dielectric.shapey,
+        dielectric.shapez,
+        dielectric.shapex + 0.01,
+        dielectric.shapey + 0.01,
+        dielectric.shapez + 0.01,
+    )
+
+
 def extractFasterCapfile(filename: str):
 
     # for i in range(len(PatternShapes)):
@@ -976,22 +1161,17 @@ def extractFasterCapfile(filename: str):
             for j in range(len(PatternShapes)):
 
                 if PatternShapes[j].shapetype == 1:
-                    if (
-                        shape.shapey
-                        >= PatternShapes[j].shapey + PatternShapes[j].shapethickness
-                    ):
-                        continue
-                    elif shape.shapey == PatternShapes[j].shapey:
+                    conductor_bottom = PatternShapes[j].shapey
+                    conductor_top = (
+                        conductor_bottom + PatternShapes[j].shapethickness
+                    )
+                    dielectric_bottom = shape.shapey
+                    dielectric_top = dielectric_bottom + shape.shapethickness
+                    overlap = min(conductor_top, dielectric_top) - max(
+                        conductor_bottom, dielectric_bottom
+                    )
+                    if overlap > 1.0e-9:
                         condintersect.append(j)
-                    elif shape.shapey < PatternShapes[j].shapey:
-                        continue
-                    elif (
-                        shape.shapey
-                        < PatternShapes[j].shapey + PatternShapes[j].shapethickness
-                    ):
-                        condintersect.append(j)
-                    else:
-                        break
                 else:
                     # print(shape.name)
                     continue
@@ -1005,14 +1185,17 @@ def extractFasterCapfile(filename: str):
             for j in range(len(PatternShapes)):
 
                 if PatternShapes[j].shapetype == 0:
-                    if shape.shapey > PatternShapes[j].shapey:
-                        continue
-                    elif shape.shapey == PatternShapes[j].shapey:
+                    conductor_bottom = shape.shapey
+                    conductor_top = conductor_bottom + shape.shapethickness
+                    dielectric_bottom = PatternShapes[j].shapey
+                    dielectric_top = (
+                        dielectric_bottom + PatternShapes[j].shapethickness
+                    )
+                    overlap = min(conductor_top, dielectric_top) - max(
+                        conductor_bottom, dielectric_bottom
+                    )
+                    if overlap > 1.0e-9:
                         dielintersect.append(j)
-                    elif shape.shapey + shape.shapethickness > PatternShapes[j].shapey:
-                        dielintersect.append(j)
-                    else:
-                        break
                 else:
                     # print(shape.name)
                     continue
@@ -1130,6 +1313,14 @@ def extractFasterCapfile(filename: str):
             intersectiondiel = 0
 
             for intersection in intersectionslist:
+                conductor = PatternShapes[conductorindexlist[conductorindex]]
+                dielectric = PatternShapes[intersection]
+                segment_y = max(conductor.shapey, dielectric.shapey)
+                segment_top = min(
+                    conductor.shapey + conductor.shapethickness,
+                    dielectric.shapey + dielectric.shapethickness,
+                )
+                segment_thickness = round(segment_top - segment_y, 10)
 
                 if intersectiondiel == 0:
                     conductorfile = (
@@ -1140,7 +1331,7 @@ def extractFasterCapfile(filename: str):
                             PatternShapes[conductorindexlist[conductorindex]].shapewidth
                         )
                         + "_T"
-                        + str(PatternShapes[intersection].shapethickness)
+                        + str(segment_thickness)
                         + "_H"
                         + str(
                             PatternShapes[
@@ -1153,25 +1344,15 @@ def extractFasterCapfile(filename: str):
                         conductorfile,
                         PatternShapes[conductorindexlist[conductorindex]].name,
                         PatternShapes[conductorindexlist[conductorindex]].shapewidth,
-                        PatternShapes[intersection].shapethickness,
+                        segment_thickness,
                         PatternShapes[conductorindexlist[conductorindex]].shapeheight,
                     )
                     insert_conductor_into_pattern_file(
                         FasterCapFile,
                         conductorfile,
-                        round(
-                            float(
-                                processDielectrics[
-                                    PatternShapes[
-                                        dielindexlist[intersection]
-                                    ].shapeorder
-                                ].epsilon
-                            )
-                            * float(1.0e-6),
-                            8,
-                        ),
+                        scaled_dielectric_epsilon(PatternShapes[intersection]),
                         PatternShapes[conductorindexlist[conductorindex]].shapex,
-                        PatternShapes[intersection].shapey,
+                        segment_y,
                         PatternShapes[conductorindexlist[conductorindex]].shapez,
                     )
                     FasterCapFile.write(" + \n")
@@ -1182,7 +1363,7 @@ def extractFasterCapfile(filename: str):
                     + "_W"
                     + str(PatternShapes[conductorindexlist[conductorindex]].shapewidth)
                     + "_T"
-                    + str(PatternShapes[intersection].shapethickness)
+                    + str(segment_thickness)
                     + "_H"
                     + str(PatternShapes[conductorindexlist[conductorindex]].shapeheight)
                     + "-sides.txt"
@@ -1191,23 +1372,15 @@ def extractFasterCapfile(filename: str):
                     conductorfile,
                     PatternShapes[conductorindexlist[conductorindex]].name,
                     PatternShapes[conductorindexlist[conductorindex]].shapewidth,
-                    PatternShapes[intersection].shapethickness,
+                    segment_thickness,
                     PatternShapes[conductorindexlist[conductorindex]].shapeheight,
                 )
                 insert_conductor_into_pattern_file(
                     FasterCapFile,
                     conductorfile,
-                    round(
-                        float(
-                            processDielectrics[
-                                PatternShapes[dielindexlist[intersection]].shapeorder
-                            ].epsilon
-                        )
-                        * float(1.0e-6),
-                        8,
-                    ),
+                    scaled_dielectric_epsilon(PatternShapes[intersection]),
                     PatternShapes[conductorindexlist[conductorindex]].shapex,
-                    PatternShapes[intersection].shapey,
+                    segment_y,
                     PatternShapes[conductorindexlist[conductorindex]].shapez,
                 )
                 FasterCapFile.write(" + \n")
@@ -1221,7 +1394,7 @@ def extractFasterCapfile(filename: str):
                             PatternShapes[conductorindexlist[conductorindex]].shapewidth
                         )
                         + "_T"
-                        + str(PatternShapes[intersection].shapethickness)
+                        + str(segment_thickness)
                         + "_H"
                         + str(
                             PatternShapes[
@@ -1234,26 +1407,17 @@ def extractFasterCapfile(filename: str):
                         conductorfile,
                         PatternShapes[conductorindexlist[conductorindex]].name,
                         PatternShapes[conductorindexlist[conductorindex]].shapewidth,
-                        PatternShapes[intersection].shapethickness,
+                        segment_thickness,
                         PatternShapes[conductorindexlist[conductorindex]].shapeheight,
                     )
                     insert_conductor_into_pattern_file(
                         FasterCapFile,
                         conductorfile,
-                        round(
-                            float(
-                                processDielectrics[
-                                    PatternShapes[
-                                        dielindexlist[intersection]
-                                    ].shapeorder
-                                    + 1
-                                ].epsilon
-                            )
-                            * float(1.0e-6),
-                            8,
+                        adjacent_dielectric_epsilon(
+                            PatternShapes[intersection], 1
                         ),
                         PatternShapes[conductorindexlist[conductorindex]].shapex,
-                        PatternShapes[intersection].shapey,
+                        segment_y,
                         PatternShapes[conductorindexlist[conductorindex]].shapez,
                     )
                     FasterCapFile.write("\n\n")
@@ -1263,13 +1427,10 @@ def extractFasterCapfile(filename: str):
 
     dielindex = 0
     for intersections in dielintersections:
-
-        if "m" in PatternShapes[dielindexlist[dielindex]].name:
-            dielectricororder = int(
-                PatternShapes[dielindexlist[dielindex]].name.split("_")[0].split("m")[1]
-            )
-        else:
-            dielectricororder = 0
+        # The wires file already contains only the dielectric window relevant
+        # to this case.  Do not infer metal scope from legacy mN_* names:
+        # ICT-derived names such as ict_13_NILD6_part2 are equally valid.
+        dielectricororder = minimumconductorlayer
 
         if (dielectricororder >= minimumconductorlayer) and (
             dielectricororder <= maximumconductorlayer
@@ -1305,16 +1466,8 @@ def extractFasterCapfile(filename: str):
                             FasterCapFile,
                             dielectricfile,
                             float(1.0e-6),
-                            round(
-                                float(
-                                    processDielectrics[
-                                        PatternShapes[
-                                            dielindexlist[dielindex]
-                                        ].shapeorder
-                                    ].epsilon
-                                )
-                                * float(1.0e-6),
-                                8,
+                            scaled_dielectric_epsilon(
+                                PatternShapes[dielindexlist[dielindex]]
                             ),
                             PatternShapes[dielindexlist[dielindex]].shapex,
                             PatternShapes[dielindexlist[dielindex]].shapey,
@@ -1351,28 +1504,11 @@ def extractFasterCapfile(filename: str):
                         insert_dielectric_into_pattern_file(
                             FasterCapFile,
                             dielectricfile,
-                            round(
-                                float(
-                                    processDielectrics[
-                                        PatternShapes[
-                                            dielindexlist[dielindex]
-                                        ].shapeorder
-                                        - 1
-                                    ].epsilon
-                                )
-                                * float(1.0e-6),
-                                8,
+                            adjacent_dielectric_epsilon(
+                                PatternShapes[dielindexlist[dielindex]], -1
                             ),
-                            round(
-                                float(
-                                    processDielectrics[
-                                        PatternShapes[
-                                            dielindexlist[dielindex]
-                                        ].shapeorder
-                                    ].epsilon
-                                )
-                                * float(1.0e-6),
-                                8,
+                            scaled_dielectric_epsilon(
+                                PatternShapes[dielindexlist[dielindex]]
                             ),
                             PatternShapes[dielindexlist[dielindex]].shapex,
                             PatternShapes[dielindexlist[dielindex]].shapey,
@@ -1408,14 +1544,8 @@ def extractFasterCapfile(filename: str):
                     FasterCapFile,
                     dielectricfile,
                     1.0e-6,
-                    round(
-                        float(
-                            processDielectrics[
-                                PatternShapes[dielindexlist[dielindex]].shapeorder
-                            ].epsilon
-                        )
-                        * float(1.0e-6),
-                        8,
+                    scaled_dielectric_epsilon(
+                        PatternShapes[dielindexlist[dielindex]]
                     ),
                     PatternShapes[dielindexlist[dielindex]].shapex,
                     PatternShapes[dielindexlist[dielindex]].shapey,
@@ -1447,24 +1577,11 @@ def extractFasterCapfile(filename: str):
                     insert_dielectric_into_pattern_file(
                         FasterCapFile,
                         dielectricfile,
-                        round(
-                            float(
-                                processDielectrics[
-                                    PatternShapes[dielindexlist[dielindex]].shapeorder
-                                    + 1
-                                ].epsilon
-                            )
-                            * float(1.0e-6),
-                            8,
+                        adjacent_dielectric_epsilon(
+                            PatternShapes[dielindexlist[dielindex]], 1
                         ),
-                        round(
-                            float(
-                                processDielectrics[
-                                    PatternShapes[dielindexlist[dielindex]].shapeorder
-                                ].epsilon
-                            )
-                            * float(1.0e-6),
-                            8,
+                        scaled_dielectric_epsilon(
+                            PatternShapes[dielindexlist[dielindex]]
                         ),
                         PatternShapes[dielindexlist[dielindex]].shapex,
                         PatternShapes[dielindexlist[dielindex]].shapey,
@@ -1478,6 +1595,17 @@ def extractFasterCapfile(filename: str):
 
             else:
                 # create dielectric files respecting the coordinates of conductors #
+                write_intersected_dielectric(
+                    FasterCapFile,
+                    PatternShapes[dielindexlist[dielindex]],
+                    intersections,
+                    dielindex,
+                    len(dielintersections),
+                    groundconductorexists,
+                )
+                FasterCapFile.write("\n\n")
+                dielindex += 1
+                continue
 
                 rowsstartingpoints = []
                 rowsnumber = patternswindowheight / 0.01

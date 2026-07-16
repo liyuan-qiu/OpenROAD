@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import re
 import statistics
@@ -12,9 +13,12 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 FC_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(FC_DIR.parent / "fastercapnangate45" / "scripts"))
 
 from scan_wires_quality import STRONG_TH, parse_last_matrix, rel_asym, scan_log  # noqa: E402
+
+from matrix_quality_gate import GateConfig, evaluate_matrix_quality_gate  # noqa: E402
 
 DIM_RE = re.compile(r"^\s*Dimension\s+(\d+)\s+x\s+\d+\s*$", re.I)
 
@@ -213,11 +217,76 @@ def stat_block(subset: list[dict], label: str) -> list[str]:
 
 
 def main() -> None:
-    root = FC_DIR / "6v2_typ_wirefix"
-    out_csv = FC_DIR / "6v2_typ_wirefix_symmetry_full.csv"
-    out_sum = FC_DIR / "6v2_typ_wirefix_symmetry_summary.txt"
+    ap = argparse.ArgumentParser(description="Analyze FasterCap matrix and victim symmetry")
+    ap.add_argument("--root", type=Path, default=FC_DIR / "6v2_typ_wirefix")
+    ap.add_argument("--out-prefix", type=Path, default=FC_DIR / "6v2_typ_wirefix")
+    ap.add_argument(
+        "--only-pattern-type",
+        choices=("Over5", "OverUnder5", "Under5", "UnderDiag5"),
+    )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail unless all matrices parse with no sign flips and symmetry <= --max-rel",
+    )
+    ap.add_argument("--max-rel", type=float, default=0.10)
+    ap.add_argument(
+        "--reject-pos-offdiag",
+        action="store_true",
+        default=True,
+        help="Strict gate: reject strong positive off-diagonal (default: on)",
+    )
+    ap.add_argument(
+        "--no-reject-pos-offdiag",
+        action="store_false",
+        dest="reject_pos_offdiag",
+        help="Disable positive off-diagonal rejection in strict gate",
+    )
+    ap.add_argument(
+        "--reject-sign-flip",
+        action="store_true",
+        default=True,
+        help="Strict gate: reject sign-flip reciprocal pairs (default: on)",
+    )
+    ap.add_argument(
+        "--no-reject-sign-flip",
+        action="store_false",
+        dest="reject_sign_flip",
+        help="Disable sign-flip rejection in strict gate",
+    )
+    ap.add_argument(
+        "--rules-summary",
+        type=Path,
+        help="Append an existing FasterCap-vs-rules Markdown summary",
+    )
+    ap.add_argument(
+        "--skip-list",
+        type=Path,
+        help="Optional case paths relative to --root, one per line",
+    )
+    args = ap.parse_args()
+
+    root = args.root.resolve()
+    out_csv = Path(f"{args.out_prefix}_symmetry_full.csv")
+    out_sum = Path(f"{args.out_prefix}_symmetry_summary.txt")
 
     logs = sorted(p for p in root.rglob("wires.log") if p.stat().st_size > 0)
+    if args.skip_list and args.skip_list.is_file():
+        skipped = {
+            line.strip().removeprefix("./")
+            for line in args.skip_list.read_text(errors="replace").splitlines()
+            if line.strip()
+        }
+        logs = [
+            path
+            for path in logs
+            if str(path.parent.relative_to(root)).removeprefix("./") not in skipped
+        ]
+    if args.only_pattern_type:
+        marker = f"/{args.only_pattern_type}/"
+        logs = [p for p in logs if marker in p.as_posix()]
+    if not logs:
+        raise SystemExit(f"No non-empty wires.log files under {root}")
     print(f"Analyzing {len(logs)} wires.log ...")
 
     rows: list[dict] = []
@@ -234,7 +303,7 @@ def main() -> None:
         w.writerows(rows)
 
     summary = [
-        "Sky130 6v2_typ_wirefix 对称性全量分析",
+        "Sky130 FasterCap 对称性分析",
         f"Dataset: {root}",
         f"CSV: {out_csv}",
         f"Total non-empty wires.log: {len(rows)}",
@@ -254,7 +323,7 @@ def main() -> None:
 
     # sym50 gate overlap
     skipped_patterns: set[str] = set()
-    skip_file = FC_DIR / "6v2_typ_wirefix_parse_sym50" / "skipped_asymmetry"
+    skip_file = Path(f"{args.out_prefix}_parse_sym50") / "skipped_asymmetry"
     if skip_file.exists():
         for line in skip_file.read_text().splitlines():
             path = line.split(" rel=")[0].strip()
@@ -275,10 +344,68 @@ def main() -> None:
         summary.append(f"  in caps subset strong asym >50%: {sum(1 for x in strong_caps if x > 0.5)}")
 
     text = "\n".join(summary) + "\n"
+    if args.rules_summary:
+        if not args.rules_summary.is_file():
+            raise SystemExit(f"Rules summary not found: {args.rules_summary}")
+        text += "\n=== rcx_patterns.rules 对比 ===\n\n"
+        text += args.rules_summary.read_text()
+        if not text.endswith("\n"):
+            text += "\n"
     out_sum.write_text(text)
     print(text)
     print(f"Wrote {out_csv}")
     print(f"Wrote {out_sum}")
+
+    if args.check:
+        gate_cfg = GateConfig(
+            max_rel=args.max_rel,
+            reject_pos_offdiag=args.reject_pos_offdiag,
+            reject_sign_flip=args.reject_sign_flip,
+        )
+        parsed = [r for r in rows if _truthy(r["parsed_matrix"])]
+        lr = [
+            float(r["lr_rel_asym"])
+            for r in parsed
+            if r.get("lr_status") == "ok" and r["lr_rel_asym"] not in ("", None)
+        ]
+        failures = []
+        strict_failures = []
+        if len(parsed) != len(rows):
+            failures.append(f"parsed {len(parsed)}/{len(rows)} matrices")
+
+        for log in logs:
+            mat = parse_last_matrix(log.read_text(errors="replace").splitlines())
+            ok, reason, _metrics = evaluate_matrix_quality_gate(mat, gate_cfg)
+            if not ok:
+                rel = str(log.relative_to(root)).replace("/wires.log", "")
+                strict_failures.append(f"{rel}: {reason}")
+
+        if strict_failures:
+            failures.append(
+                f"strict gate failed on {len(strict_failures)}/{len(logs)} matrices"
+            )
+            for entry in strict_failures[:10]:
+                failures.append(f"  {entry}")
+            if len(strict_failures) > 10:
+                failures.append(f"  ... and {len(strict_failures) - 10} more")
+
+        if lr and max(lr) > args.max_rel:
+            failures.append(f"max C32/C34 asymmetry {max(lr):.2%} > {args.max_rel:.2%}")
+
+        passed = len(logs) - len(strict_failures)
+        print(
+            f"Strict gate (max_rel={args.max_rel:.2%}, "
+            f"pos_offdiag={'on' if args.reject_pos_offdiag else 'off'}, "
+            f"sign_flip={'on' if args.reject_sign_flip else 'off'}): "
+            f"pass {passed}/{len(logs)}"
+        )
+
+        if failures:
+            raise SystemExit("Symmetry check FAILED: " + "; ".join(failures[:3]))
+        print(
+            f"Symmetry check PASSED: {len(rows)} matrices, "
+            f"C32/C34 max={max(lr, default=0):.2%}"
+        )
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ then
 	echo "Usage <in_dir> <out_dir> <standard|normalized> <ext> <converter_python> <fasterCap_exec>"
 	exit
 fi
-script_dir="$(dirname "$0")"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
 
 in_dir=$1
 outDir=$2
@@ -39,6 +39,12 @@ optimized|halfmin542|ps128)
 	;;
 esac
 force_rerun="${FASTER_CAP_FORCE_RERUN:-0}"
+skip_list="${FASTER_CAP_SKIP_LIST:-}"
+failed_list="${FASTER_CAP_FAILED_LIST:-}"
+allow_failures="${FASTER_CAP_ALLOW_FAILURES:-0}"
+if [ -n "$failed_list" ]; then
+	: > "$failed_list"
+fi
 
 cd $in_dir
 find . -name wires -print | sort > wires_file_list
@@ -59,42 +65,110 @@ echo "$out" > $out
 
 START_DIR=`pwd`
 # echo "----------------------------------------- start DIR: $START_DIR"
+failed_cases=0
+reuse_cases=0
+run_cases=0
+progress_file="${FASTER_CAP_PROGRESS_FILE:-}"
 
-for ii in `cat $in_dir/wires_file_list`
+emit_progress() {
+	# Usage: emit_progress <idx> <total> <action> <rel_dir>
+	local idx="$1" total="$2" action="$3" rel="$4"
+	local msg="[PROGRESS] ${idx}/${total} ${action} ${rel}"
+	echo "$msg"
+	if [ -n "$progress_file" ]; then
+		printf '%s\t%s\t%s\t%s\n' "$idx" "$total" "$action" "$rel" > "$progress_file"
+	fi
+}
+
+has_valid_wires_log() {
+	# Resume policy (user): any non-empty wires.log means "already ran — skip".
+	# Parse can extract from intermediate matrices; do not require Total time: here.
+	# Empty 0-byte logs are re-run. Force-rerun with FASTER_CAP_FORCE_RERUN=1.
+	[ -s wires.log ]
+}
+
+# Timeout/failure path renames wires.log -> wires.log.failed. For resume, treat a
+# non-empty failed log the same as a normal log: restore it and skip re-solve.
+restore_failed_wires_log_if_needed() {
+	if [ ! -s wires.log ] && [ -s wires.log.failed ]; then
+		mv -f wires.log.failed wires.log
+		echo "Restored wires.log from wires.log.failed"
+		return 0
+	fi
+	return 1
+}
+
+# Build the case list once so progress can show idx/total.
+work_list=()
+while IFS= read -r ii; do
+	[ -n "$ii" ] || continue
+	dirName=`dirname "$ii"`
+	rel_dir="${dirName#./}"
+	if [ -n "$skip_list" ] && [ -f "$skip_list" ] && grep -Fxq "$rel_dir" "$skip_list"; then
+		echo "Skipped preflight: $dirName"
+		continue
+	fi
+	if [ "$pattern" != "ALL" ]; then
+		if [[ "$dirName" != *"$pattern"* ]]; then
+			continue
+		fi
+	fi
+	work_list+=("$rel_dir")
+done < "$in_dir/wires_file_list"
+
+total=${#work_list[@]}
+echo "[PROGRESS] 0/${total} start force_rerun=${force_rerun}"
+if [ -n "$progress_file" ]; then
+	printf '0\t%s\tstart\t\n' "$total" > "$progress_file"
+fi
+
+idx=0
+for rel_dir in "${work_list[@]}"
 do
-	dirName=`dirname $ii`
-	if [ "$pattern" != "ALL" ] ; then
-		if [[ "$dirName" != *"$pattern"* && $pattern!="ALL" ]] ; then
+	idx=$((idx + 1))
+	dirName="./${rel_dir}"
+
+	cd "$START_DIR/$in_dir/$rel_dir"
+
+	# Prefer existing non-empty result. wires.log.failed (timeout/quarantine) counts too.
+	if [ "$force_rerun" != "1" ]; then
+		restore_failed_wires_log_if_needed || true
+		if has_valid_wires_log; then
+			reuse_cases=$((reuse_cases + 1))
+			emit_progress "$idx" "$total" "reuse" "$rel_dir"
+			echo "Done $dirName `ls -ltr wires.log | awk '{print $5 " " $6 " " $7 " " $8}' `"
+			cd "$START_DIR"
 			continue
 		fi
 	fi
-
-	cd $START_DIR/$in_dir/$dirName 
-
-	# incrementality -- if wires.log has total allocated memore greater than 100MB, skip pattern
-	wires_log=wires.log
-	if [ -e $wires_log ] && [ "$force_rerun" != "1" ]; then
-		# Only skip if the previous run produced a non-empty log.
-		# (Empty files are typically from early kill/permission issues.)
-		if [ -s $wires_log ]; then
-			echo "Done $dirName `ls -ltr $wires_log | awk '{print $5 " " $6 " " $7 " " $8}' `"
-			continue
-		else
-			echo "Empty $dirName ($wires_log is 0 bytes), re-running"
-		fi
-		bytes=$(grep "Total allocated memory" "$wires_log" 2>/dev/null | awk '{print $4}' | head -n 1)
-		# If the log is incomplete/empty, $bytes can be empty; guard numeric compare.
-		if [[ -n "${bytes:-}" && "$bytes" =~ ^[0-9]+$ ]]; then
-			if [ "$bytes" -gt 100000 ]; then
-				ls -ltr -h "$wires_log"
-				continue
-			fi
-		fi
+	if [ -e wires.log ] && [ ! -s wires.log ]; then
+		echo "Empty $dirName (wires.log is 0 bytes), re-running"
 	fi
+
+	emit_progress "$idx" "$total" "running" "$rel_dir"
 	echo " "
 	echo "`date` $dirName Running "
 	# echo "python3 $python_script  $START_DIR/$in_dir/process.out ./ ./ $std_normal -sim_window_ext  -$ext_x -$ext_z -$ext_y $ext_x $ext_z $ext_y > conv.log "
-	python3 $python_script  $START_DIR/$in_dir/process.out ./ ./ $std_normal -sim_window_ext  -$ext_x -$ext_z -$ext_y $ext_x $ext_z $ext_y > wireDielGeomGen.log
+	if ! python3 "$python_script" "$START_DIR/$in_dir/process.out" ./ ./ "$std_normal" \
+		-sim_window_ext -$ext_x -$ext_z -$ext_y $ext_x $ext_z $ext_y \
+		> wireDielGeomGen.log 2>&1; then
+		echo "ERROR converter failed: $dirName"
+		rm -f wires.log
+		[ -z "$failed_list" ] || echo "$rel_dir" >> "$failed_list"
+		failed_cases=$((failed_cases + 1))
+		emit_progress "$idx" "$total" "failed" "$rel_dir"
+		cd "$START_DIR"
+		continue
+	fi
+	if [ ! -s wires.lst ]; then
+		echo "ERROR converter produced empty/missing wires.lst: $dirName"
+		rm -f wires.log
+		[ -z "$failed_list" ] || echo "$rel_dir" >> "$failed_list"
+		failed_cases=$((failed_cases + 1))
+		emit_progress "$idx" "$total" "failed" "$rel_dir"
+		cd "$START_DIR"
+		continue
+	fi
 
 	fc_args=(-b wires.lst)
 	if [ "$use_g" = "1" ]; then
@@ -116,8 +190,38 @@ do
 	TIME_LIMIT="${FASTER_CAP_TIME_LIMIT:-600}"
 	CHECK_INTERVAL="${FASTER_CAP_CHECK_INTERVAL:-30}"
 	$script_dir/limit_kill.bash $job_pid "$TIME_LIMIT" "$CHECK_INTERVAL"
-	egrep "w3 " wires.log
+	wait "$job_pid"
+	status=$?
+	if [ "$status" -ne 0 ] \
+		|| ! grep -q "Capacitance matrix is:" wires.log \
+		|| ! grep -q "Total time:" wires.log; then
+		echo "ERROR FasterCap failed or incomplete (exit=$status; need Capacitance matrix + Total time): $dirName"
+		mv -f wires.log wires.log.failed
+		[ -z "$failed_list" ] || echo "$rel_dir" >> "$failed_list"
+		failed_cases=$((failed_cases + 1))
+		emit_progress "$idx" "$total" "failed" "$rel_dir"
+		cd "$START_DIR"
+		continue
+	fi
+	grep "w3 " wires.log
+	run_cases=$((run_cases + 1))
+	emit_progress "$idx" "$total" "completed" "$rel_dir"
 	echo "`date` $dirName Completed"
 	cd $START_DIR
 done
+
+echo "[PROGRESS] ${total}/${total} finished reuse=${reuse_cases} ran=${run_cases} failed=${failed_cases}"
+if [ -n "$progress_file" ]; then
+	printf '%s\t%s\tfinished\treuse=%s ran=%s failed=%s\n' \
+		"$total" "$total" "$reuse_cases" "$run_cases" "$failed_cases" > "$progress_file"
+fi
+
+if [ "$failed_cases" -gt 0 ]; then
+	if [ "$allow_failures" = "1" ]; then
+		echo "WARN: quarantined $failed_cases FasterCap case(s)"
+	else
+		echo "ERROR: $failed_cases FasterCap case(s) failed"
+		exit 2
+	fi
+fi
 

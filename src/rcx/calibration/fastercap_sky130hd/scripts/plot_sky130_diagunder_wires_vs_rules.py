@@ -182,6 +182,9 @@ def collect_wires_log_diagunder(
     wire: int = 3,
     diag_s0_only: bool = True,
     cg_mode: str = "tc_minus_cc",
+    skip_cases: set[str] | None = None,
+    stack: str = "",
+    len_mult: int | None = None,
 ) -> dict[Key, list[Point3]]:
     if wire != 3:
         raise ValueError("only victim wire 3 is supported for UnderDiag5")
@@ -194,11 +197,18 @@ def collect_wires_log_diagunder(
         rel = str(log_path.relative_to(run_dir))
         if "UnderDiag5" not in rel:
             continue
+        case = str(log_path.parent.relative_to(run_dir))
+        if skip_cases and case in skip_cases:
+            continue
+        if stack and f"/{stack}/" not in f"/{rel}":
+            continue
         if diag_s0_only and not DIAG_S0_RE.search(rel):
             continue
 
         meta = parse_log_path(log_path, run_dir)
         if meta is None:
+            continue
+        if len_mult is not None and meta["len_mult"] != len_mult:
             continue
 
         vals = extract_wire3_from_log(
@@ -352,14 +362,27 @@ def main() -> None:
     ])
     ap.add_argument("--all-diag-spacing", action="store_true")
     ap.add_argument("--fc-label", default="wires.log wire_3")
+    ap.add_argument("--skip-list")
+    ap.add_argument("--stack", default="")
+    ap.add_argument("--len-mult", type=int)
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir)
     rules = parse_diagunder(Path(args.rules))
+    skip_cases: set[str] = set()
+    if args.skip_list:
+        skip_cases = {
+            line.strip().removeprefix("./")
+            for line in Path(args.skip_list).read_text(errors="replace").splitlines()
+            if line.strip()
+        }
     fc = collect_wires_log_diagunder(
         run_dir,
         diag_s0_only=not args.all_diag_spacing,
         cg_mode=args.cg_mode,
+        skip_cases=skip_cases,
+        stack=args.stack,
+        len_mult=args.len_mult,
     )
     shared = sorted(set(rules).intersection(fc))
     n = plot_vs_rules(rules, fc, Path(args.out_dir), fc_label=args.fc_label)
